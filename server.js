@@ -79,12 +79,12 @@ app.post('/api/recognize', async (req, res) => {
 
     console.log('Received messages:', messages);
 
-    // Call OpenAI API with the message history
+   
     const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: "gpt-4o",
       messages: messages,
-      temperature: 0.7, // Añadimos temperatura para hacer las respuestas más creativas
-      max_tokens: 150 // Limitamos la longitud de las respuestas
+      temperature: 0.7,
+      max_tokens: 150 
     });
 
     const responseContent = completion.choices[0].message.content;
