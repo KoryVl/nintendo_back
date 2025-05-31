@@ -38,12 +38,12 @@ mongoose.connect(mongoUri, {
 
 // Define Schema and Model for History
 const historySchema = new mongoose.Schema({
-  messages: [{
+  conversation: [{
     role: String,
     content: String,
     timestamp: { type: Date, default: Date.now }
   }],
-  timestamp: { type: Date, default: Date.now }
+  lastUpdated: { type: Date, default: Date.now }
 });
 
 const History = mongoose.model('History', historySchema);
@@ -52,6 +52,31 @@ const History = mongoose.model('History', historySchema);
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+// Función para procesar mensajes con OpenAI
+async function processMessage(messages) {
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    throw new Error('An array of messages is required');
+  }
+
+  console.log('Processing messages with OpenAI:', messages);
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4",
+    messages: messages,
+    temperature: 0.7,
+    max_tokens: 200
+  });
+
+  const responseContent = completion.choices[0].message.content;
+  console.log('OpenAI response:', responseContent);
+
+  return {
+    details: {
+      mainInfo: responseContent
+    }
+  };
+}
 
 // Ruta de prueba simple
 app.get('/', (req, res) => {
@@ -65,51 +90,65 @@ app.get('/api/test', (req, res) => {
   res.json({ message: 'API is working!' });
 });
 
-// Ruta principal - Reconocimiento y Guardado en Historial (Adaptada para chat)
+// Ruta para procesar mensajes y guardar/actualizar historial
 app.post('/api/recognize', async (req, res) => {
-  console.log('Recognize route hit (chat mode)');
-  
   try {
-    const { messages } = req.body;
-
+    const { messages, chatId } = req.body;
+    
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      console.log('No messages array provided or array is empty');
       return res.status(400).json({ error: 'An array of messages is required' });
     }
 
-    console.log('Received messages:', messages);
+    let historyEntry;
 
-   
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: messages,
-      temperature: 0.7,
-      max_tokens: 150 
-    });
-
-    const responseContent = completion.choices[0].message.content;
-    console.log('OpenAI response:', responseContent);
-    
-    const resultToSave = {
-      details: {
-        mainInfo: responseContent
+    if (chatId) {
+      // Si se proporciona un chatId, buscar y actualizar el historial existente
+      historyEntry = await History.findById(chatId);
+      if (!historyEntry) {
+        return res.status(404).json({ error: 'Chat not found' });
       }
-    };
+    } else {
+      // Si no hay chatId, crear una nueva entrada de historial
+      historyEntry = new History({
+        conversation: [],
+        lastUpdated: new Date()
+      });
+    }
+    
+    // Procesar el mensaje y obtener la respuesta de la IA
+    // Se envía todo el historial para que la IA mantenga el contexto
+    const resultToSave = await processMessage(messages);
 
-    // Guardar la conversación completa en el historial
-    const historyEntry = new History({
-      messages: messages.map(msg => ({
-        role: msg.role,
-        content: msg.content,
+    // Agregar el último mensaje del usuario y la respuesta de la IA a la conversación
+    const lastUserMessage = messages.find(msg => msg.role === 'user' && msg.content === req.body.messages[req.body.messages.length - 1].content); // Asegurarse de tomar el último mensaje de usuario enviado en este request
+    
+    if(lastUserMessage) {
+      historyEntry.conversation.push({
+        role: lastUserMessage.role,
+        content: lastUserMessage.content,
         timestamp: new Date()
-      })),
+      });
+    }
+
+    const aiResponse = {
+      role: 'assistant',
+      content: resultToSave.details.mainInfo,
       timestamp: new Date()
+    };
+    historyEntry.conversation.push(aiResponse);
+    
+    // Actualizar timestamp de última modificación
+    historyEntry.lastUpdated = new Date();
+    
+    await historyEntry.save();
+    console.log('History entry saved/updated:', historyEntry._id);
+
+    // Devolver la respuesta de la IA y el chatId (nuevo o existente)
+    res.json({
+      aiResponse: resultToSave,
+      chatId: historyEntry._id
     });
 
-    await historyEntry.save();
-    console.log('History entry saved:', historyEntry._id);
-
-    res.json(resultToSave);
   } catch (error) {
     console.error('Error in /api/recognize:', error);
     res.status(500).json({ 
@@ -119,19 +158,52 @@ app.post('/api/recognize', async (req, res) => {
   }
 });
 
-// Ruta para obtener historial de chat
+// Ruta para obtener una lista de historiales (para la barra lateral, por ejemplo)
 app.get('/api/history', async (req, res) => {
-  console.log('History route hit');
+  console.log('List history route hit');
   try {
-    const history = await History.find()
-      .sort({ timestamp: -1 })
-      .limit(10)
-      .select('messages timestamp');
+    // Obtener todas las entradas de historial, mostrando solo un resumen
+    const historyList = await History.find()
+      .sort({ lastUpdated: -1 })
+      .select('_id conversation lastUpdated'); // Seleccionar solo los campos necesarios
     
-    console.log('Sending history:', history.length, 'entries');
-    res.json(history);
+    // Formatear la lista para incluir un título basado en el primer mensaje de usuario
+    const formattedHistory = historyList.map(chat => {
+      const firstUserMessage = chat.conversation.find(msg => msg.role === 'user');
+      const title = firstUserMessage ? firstUserMessage.content.substring(0, 50) + (firstUserMessage.content.length > 50 ? '...' : '') : 'Nuevo Chat';
+      return {
+        _id: chat._id,
+        title: title,
+        lastUpdated: chat.lastUpdated
+      };
+    });
+
+    console.log('Sending history list:', formattedHistory.length, 'entries');
+    res.json(formattedHistory);
   } catch (error) {
-    console.error('Error fetching history:', error);
+    console.error('Error fetching history list:', error);
+    res.status(500).json({
+      error: 'Error fetching history list',
+      message: error.message
+    });
+  }
+});
+
+// Ruta para obtener los detalles completos de un historial específico
+app.get('/api/history/:chatId', async (req, res) => {
+  const chatId = req.params.chatId;
+  console.log(`Fetching history for chat ID: ${chatId}`);
+  try {
+    const historyEntry = await History.findById(chatId);
+    
+    if (!historyEntry) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    console.log('Sending full history for chat ID:', chatId);
+    res.json(historyEntry);
+  } catch (error) {
+    console.error(`Error fetching history for chat ID ${chatId}:`, error);
     res.status(500).json({
       error: 'Error fetching history',
       message: error.message
@@ -156,6 +228,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('- GET  /');
   console.log('- GET  /api/test');
   console.log('- POST /api/recognize');
-  console.log('- GET  /api/history'); // Added history route to logs
+  console.log('- GET  /api/history');
+  console.log('- GET  /api/history/:chatId');
   console.log('========================================');
 }); 
