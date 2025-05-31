@@ -1,0 +1,19 @@
+# Node modules
+node_modules/
+
+# Logs
+logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Build output (si usas TypeScript o bundlers)
+dist/
+
+# Editor/OS files
+.DS_Store
+.idea
+.fleet
